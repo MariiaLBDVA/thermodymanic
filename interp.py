@@ -1,4 +1,3 @@
-from unittest import result
 import pandas as pd
 import numpy as np
 from scipy.interpolate import interp1d
@@ -9,39 +8,88 @@ from chemlib import Compound
 from scipy import constants
 from scipy.optimize import least_squares
 
-
-def clean_experimental_data_local_outliers(temp, concentration, solubility, 
-                                           z_thresh=3, k=15):
-    X = np.column_stack([temp, concentration])
+def clean_experimental_data_local_outliers(X, y, z_thresh=3, k=15, method='zscore', 
+                                          return_mask=False, **kwargs):
+    """
+    Универсальная функция для очистки экспериментальных данных от выбросов.
     
-    nbrs = NearestNeighbors(n_neighbors=k + 1)
+    Parameters:
+    -----------
+    X : array-like, shape (n_samples, n_features)
+        Матрица признаков (например, температура, концентрация и т.д.)
+    y : array-like, shape (n_samples,)
+        Целевая переменная (например, растворимость)
+    z_thresh : float, default=3
+        Порог для z-оценки
+    k : int, default=15
+        Количество ближайших соседей
+    method : str, default='zscore'
+        Метод обнаружения выбросов: 'zscore', 'iqr', 'mad'
+    return_mask : bool, default=False
+        Возвращать ли маску вместо отфильтрованных данных
+    **kwargs : dict
+        Дополнительные параметры
+    
+    Returns:
+    --------
+    Если return_mask=False:
+        X_clean, y_clean : отфильтрованные данные
+    Если return_mask=True:
+        mask : булева маска (True для хороших точек)
+    """
+    X = np.asarray(X)
+    y = np.asarray(y)
+    
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    
+    mask_good = np.ones(len(y), dtype=bool)
+    
+    nbrs = NearestNeighbors(n_neighbors=min(k + 1, len(y)), **kwargs)
     nbrs.fit(X)
-    dist, idx = nbrs.kneighbors(X)
+    distances, indices = nbrs.kneighbors(X)
     
-    mask_good = np.ones(len(solubility), dtype=bool)
-    
-    for i in range(len(solubility)):
-        neigh_idx = idx[i, 1:]  # исключаем саму точку
-        local_mean = np.mean(solubility[neigh_idx])
-        local_std = np.std(solubility[neigh_idx])
+    for i in range(len(y)):
+        neigh_idx = indices[i, 1:]  # исключаем саму точку
         
-        if local_std > 0:
-            z = np.abs(solubility[i] - local_mean) / local_std
-            if z > z_thresh:
-                mask_good[i] = False
-    
-    return (
-        temp[mask_good],
-        concentration[mask_good],
-        solubility[mask_good]
-    )
+        # Локальная статистика
+        local_values = y[neigh_idx]
+        local_mean = np.mean(local_values)
+        local_std = np.std(local_values)
+        
+        # Разные методы обнаружения выбросов
+        if method == 'zscore':
+            if local_std > 0:
+                z_score = np.abs(y[i] - local_mean) / local_std
+                if z_score > z_thresh:
+                    mask_good[i] = False
+                    
+        elif method == 'iqr':
+            # Используем межквартильный размах
+            q1 = np.percentile(local_values, 25)
+            q3 = np.percentile(local_values, 75)
+            iqr = q3 - q1
+            if iqr > 0:
+                lower_bound = q1 - z_thresh * iqr
+                upper_bound = q3 + z_thresh * iqr
+                if y[i] < lower_bound or y[i] > upper_bound:
+                    mask_good[i] = False
+                    
+        else: 
+            method == 'mad'
+            # Медианное абсолютное отклонение
+            median = np.median(local_values)
+            mad = np.median(np.abs(local_values - median))
+            if mad > 0:
+                modified_z = 0.6745 * (y[i] - median) / mad
+                if np.abs(modified_z) > z_thresh:
+                    mask_good[i] = False
 
+    return mask_good
 
 
 class WaterPropertiesInterpolator:
-    """Интерполятор для плотности и диэлектрической проницаемости воды."""
     def __init__(self):
-        """Инициализация с табличными данными при 10 МПа."""
         self.table_temps_K = np.array([298.15, 328.15, 373.15, 513.15])
         self.table_epsilon = np.array([88.3, 69.67, 55.4, 30.79])
         self.table_density = np.array([0.72068, 0.65672, 0.55203, 0.27483])
@@ -96,13 +144,33 @@ class MgSO4ConstantInterpolator(Interpolator):
 class MgSO4SolubilityInterpolator(Interpolator):
     
     def prepare_data(self):
-        temp = self.df.iloc[:, 0].values
-        MgSO4_sol = self.df.iloc[:, 1].values
-        H2SO4_conc = self.df.iloc[:, 2].values
-    
+        
+        temp_raw = self.df.iloc[:, 0].values
+        MgSO4_sol_raw = self.df.iloc[:, 1].values
+        H2SO4_conc_raw = self.df.iloc[:, 2].values
+
+        
+        mask = clean_experimental_data_local_outliers(
+            np.column_stack([temp_raw, H2SO4_conc_raw]), 
+            MgSO4_sol_raw,
+            return_mask=True,
+            z_thresh=3,
+            k=15
+        )
+        
+        # Финальные очищенные данные
+        temp = temp_raw[mask]
+        MgSO4_sol = MgSO4_sol_raw[mask]
+        H2SO4_conc = H2SO4_conc_raw[mask]
+        
+        # Сохраняем данные для визуализации
+        #очищенные точки
         self.points = np.column_stack([temp, H2SO4_conc])
         self.MgSO4_sol = MgSO4_sol
-        
+        #исходные точки
+        self.points_raw = np.column_stack([temp_raw, H2SO4_conc_raw])
+        self.MgSO4_sol_raw = MgSO4_sol_raw
+
         self.scaler = StandardScaler()
         self.points_normalized = self.scaler.fit_transform(self.points)
         
@@ -110,11 +178,13 @@ class MgSO4SolubilityInterpolator(Interpolator):
             self.points_normalized, MgSO4_sol,
             kernel='linear', smoothing=0.1
         )
+
     
     def get_sol(self, T_K, H2SO4_conc):
         point = np.array([[T_K, H2SO4_conc]])
         point_normalized = self.scaler.transform(point)
         return float(self.rbf_interpolator(point_normalized)[0])
+    
 
 class H2SO4ConstantInterpolator(Interpolator):
     
