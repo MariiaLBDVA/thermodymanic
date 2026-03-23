@@ -1,249 +1,217 @@
+import pandas as pd
+import numpy as np
+from scipy.interpolate import interp1d
+from scipy.interpolate import RBFInterpolator
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
+from chemlib import Compound
+from scipy import constants
+from scipy.optimize import least_squares
+from scipy.spatial import Delaunay
 
-# Функция расчета для конкретных T и S_Ox с возможностью добавки H2SO4 или брусита для разных ярозитов
-from xml.sax.handler import all_features
-
-
-def calculate_for_T_and_S_Ox(T, S_Ox, comp = CompositionCalculator, add_H2SO4=False, add_MgOH=False, jarosite_type='ion_name'):
+def clean_experimental_data_local_outliers(X, y, z_thresh=3, k=15, method='zscore', 
+                                          return_mask=False, **kwargs):
+    """
+    Универсальная функция для очистки экспериментальных данных от выбросов.
     
-    jar_params = jarosite_params[jarosite_type]
-    dH0 = jar_params['dH0']
-    dS0 = jar_params['dS0']
-
-    # 1. ОСНОВНЫЕ РЕАКЦИИ ОКИСЛЕНИЯ МИНЕРАЛОВ
-    # 1.1. Окисление пирита (зависит от степени окисления серы)
-    n_Fe2_pyr = comp.n_FeS2 * S_Ox
-    n_SO4_pyr = 2 * comp.n_FeS2 * S_Ox
-    n_H_pyr = 2 * comp.n_FeS2 * S_Ox
-
-    # 1.2. Окисление арсенопирита
-    n_Fe2_ars = comp.n_FeAsS
-    n_SO4_ars = comp.n_FeAsS
-    n_H_ars = 3 * comp.n_FeAsS
-    n_AsO4_ars = comp.n_FeAsS
+    Parameters:
+    -----------
+    X : array-like, shape (n_samples, n_features)
+        Матрица признаков (например, температура, концентрация и т.д.)
+    y : array-like, shape (n_samples,)
+        Целевая переменная (например, растворимость)
+    z_thresh : float, default=3
+        Порог для z-оценки
+    k : int, default=15
+        Количество ближайших соседей
+    method : str, default='zscore'
+        Метод обнаружения выбросов: 'zscore', 'iqr', 'mad'
+    return_mask : bool, default=False
+        Возвращать ли маску вместо отфильтрованных данных
+    **kwargs : dict
+        Дополнительные параметры
     
-    #количество ионов серной кислоты после окисления
-    n_SO4_free = n_SO4_pyr + n_SO4_ars + comp.n_S_excess
-    n_H_free = n_H_pyr + n_H_ars
+    Returns:
+    --------
+    Если return_mask=False:
+        X_clean, y_clean : отфильтрованные данные
+    Если return_mask=True:
+        mask : булева маска (True для хороших точек)
+    """
+    X = np.asarray(X)
+    y = np.asarray(y)
     
-    #концентрация кислоты после окисления (считаем по сульфат-ионам)
-    C_SO4_free = n_SO4_free / comp.mass_liquid
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
     
-    # 1.3 ОКИСЛЕНИЕ Fe²⁺ до Fe³⁺
-    # все железо в руде
-    n_Fe2_tot = n_Fe2_ars + n_Fe2_pyr +  comp.n_Fe_excess
+    mask_good = np.ones(len(y), dtype=bool)
     
-    # все железо, способное окислиться 
-    n_Fe2_Ox = n_Fe2_tot * Fe_Ox
+    nbrs = NearestNeighbors(n_neighbors=min(k + 1, len(y)), **kwargs)
+    nbrs.fit(X)
+    distances, indices = nbrs.kneighbors(X)
     
-    # если водород в избытке, количество окисленного железа равно всему, которое способно к окислению
-    if  n_H_free >  n_Fe2_Ox:
-        n_H_consumed_Fe_ox = n_Fe2_Ox
-        n_Fe3_tot = n_Fe2_Ox
-        n_Fe2_left = n_Fe2_tot - n_Fe2_Ox #неокисленное железо
-    # если железо в избытке, количество окисленного железа равно количеству водорода    
-    else:
-        n_H_consumed_Fe_ox = n_H_free
-        n_Fe3_tot = n_H_free
-        n_Fe2_left = n_Fe2_tot - n_Fe3_tot #неокисленное железо
-    
-    # 1.4 Окисленное железо осаждается в скородит
-    if n_AsO4_ars > n_Fe3_tot:
-        n_Fe3_FeAsO4 = 1 * n_Fe3_tot
-        n_As_left = n_AsO4_ars - n_Fe3_FeAsO4
-    else:
-        n_Fe3_FeAsO4 = n_AsO4_ars
-        n_As_left = 0
-    
-    n_H_free = n_H_free - n_H_consumed_Fe_ox
-    n_H2SO4_add = 0
-    n_SO4_added = 0
-    
-    # 2. ДОБАВКА H2SO4
-    if add_H2SO4==True:
-        n_H2SO4_add = (comp.m_H2SO4_add * 1000) / molar_masses['H2SO4']  
-        n_H_added = 2 * n_H2SO4_add
-        n_SO4_added = n_H2SO4_add
+    for i in range(len(y)):
+        neigh_idx = indices[i, 1:]  # исключаем саму точку
         
-    n_SO4_MgSO4_tot = 0
-    n_MgSO4_aq = 0
-    n_H_MgSO4_free = 0
-    n_MgSO4_tot = 0
-    n_MgSO4_prec = 0
-    n_OH = 0
-    
-    # 3. ДОБАВКА Mg(OH)2 
-    if add_MgOH==True:
-        # Переводим массу Mg(OH)2 в моли
-        n_MgOH_added = comp.m_MgOH_add / molar_masses['Mg(OH)2']  
-        n_OH_added = 2 * n_MgOH_added
+        # Локальная статистика
+        local_values = y[neigh_idx]
+        local_mean = np.mean(local_values)
+        local_std = np.std(local_values)
         
-        # Брусит нейтрализует кислоту: Mg(OH)2 + 2H⁺ → Mg²⁺ + 2H2O
-        # Количество водорода, потребляемого после добавления брусита
-        if n_H_free > n_OH_added:
-            n_H_MgSO4 = n_OH_added
-            n_MgSO4_tot = n_OH_added / 2
+        # Разные методы обнаружения выбросов
+        if method == 'zscore':
+            if local_std > 0:
+                z_score = np.abs(y[i] - local_mean) / local_std
+                if z_score > z_thresh:
+                    mask_good[i] = False
+                    
+        elif method == 'iqr':
+            # Используем межквартильный размах
+            q1 = np.percentile(local_values, 25)
+            q3 = np.percentile(local_values, 75)
+            iqr = q3 - q1
+            if iqr > 0:
+                lower_bound = q1 - z_thresh * iqr
+                upper_bound = q3 + z_thresh * iqr
+                if y[i] < lower_bound or y[i] > upper_bound:
+                    mask_good[i] = False
+                    
+        else: 
+            method == 'mad'
+            # Медианное абсолютное отклонение
+            median = np.median(local_values)
+            mad = np.median(np.abs(local_values - median))
+            if mad > 0:
+                modified_z = 0.6745 * (y[i] - median) / mad
+                if np.abs(modified_z) > z_thresh:
+                    mask_good[i] = False
+
+    return mask_good
+
+
+class WaterPropertiesInterpolator:
+    def __init__(self):
+        self.table_temps_K = np.array([298.15, 328.15, 373.15, 513.15])
+        self.table_epsilon = np.array([88.3, 69.67, 55.4, 30.79])
+        self.table_density = np.array([0.72068, 0.65672, 0.55203, 0.27483])
+        
+        self.epsilon_interp = interp1d(
+            self.table_temps_K, self.table_epsilon,
+            kind='quadratic', fill_value='extrapolate' 
+        )
+        self.density_interp = interp1d(
+            self.table_temps_K, self.table_density,
+            kind='linear', fill_value='extrapolate'
+        )
+    
+    def get_density(self, T_K):
+        return float(self.density_interp(T_K))
+    
+    def get_dielectric(self, T_K):
+        return float(self.epsilon_interp(T_K))
+
+class Interpolator:
+    
+    def __init__(self, file_path, sheet_name):
+        self.df = pd.read_excel(file_path, sheet_name=sheet_name)
+        self.scaler = None
+        self.rbf_interpolator = None
+    
+    def prepare_data(self):
+        raise NotImplementedError
+
+class MgSO4ConstantInterpolator(Interpolator):
+    
+    def prepare_data(self):
+        temp = self.df.iloc[:, 0].values + 273.15
+        logK = self.df.iloc[:, 1].values
+        K = 10 ** logK
+        
+        data_df = pd.DataFrame({'temp': temp, 'K': K})
+        avg_df = data_df.groupby('temp', as_index=False).mean()
+        
+        self.temp = avg_df['temp'].values
+        self.K = avg_df['K'].values
+        
+        self.interp_func = interp1d(
+            self.temp, self.K,
+            kind='quadratic', fill_value='extrapolate'
+        )
+    
+    def get_K(self, T_K):
+    
+        return float(self.interp_func(T_K))
+    
+class MgSO4SolubilityInterpolator(Interpolator):
+    
+    def prepare_data(self):
+        
+        temp_raw = self.df.iloc[:, 0].values
+        MgSO4_sol_raw = self.df.iloc[:, 1].values
+        H2SO4_conc_raw = self.df.iloc[:, 2].values
+
+        
+        mask = clean_experimental_data_local_outliers(
+            np.column_stack([temp_raw, H2SO4_conc_raw]), 
+            MgSO4_sol_raw,
+            return_mask=True,
+            z_thresh=3,
+            k=15
+        )
+        
+        # Финальные очищенные данные
+        temp = temp_raw[mask]
+        MgSO4_sol = MgSO4_sol_raw[mask]
+        H2SO4_conc = H2SO4_conc_raw[mask]
+        
+        # Сохраняем данные для визуализации
+        #очищенные точки
+        self.points = np.column_stack([temp, H2SO4_conc])
+        self.MgSO4_sol = MgSO4_sol
+        #исходные точки
+        self.points_raw = np.column_stack([temp_raw, H2SO4_conc_raw])
+        self.MgSO4_sol_raw = MgSO4_sol_raw
+        #Триангуляция Делоне для определения области данных
+        self.hull = Delaunay(self.points)
+        self.scaler = StandardScaler()
+        self.points_normalized = self.scaler.fit_transform(self.points)
+        
+        self.rbf_interpolator = RBFInterpolator(
+            self.points_normalized, MgSO4_sol,
+            kernel='linear', smoothing=0.1
+        )
+
+    
+    def get_sol(self, T_K, H2SO4_conc):
+        point = np.array([[T_K, H2SO4_conc]])
+        point_normalized = self.scaler.transform(point)
+        if self.hull.find_simplex(point[0]<0):
+            return None
         else:
-            n_H_MgSO4 = n_H_free
-            n_MgSO4_tot = n_H_free / 2
+            return float(self.rbf_interpolator(point_normalized)[0])
+    
+
+class H2SO4ConstantInterpolator(Interpolator):
+    
+    def prepare_data(self):
+        temp = self.df.iloc[:, 0].values + 273.15
+        logK = self.df.iloc[:, 1].values
+        ionic_strength = self.df.iloc[:, 2].values
         
-        n_SO4_MgSO4_tot = n_MgSO4_tot  # Ионов сульфата на образование сульфата магния
-        n_H_MgSO4_free = n_H_free - n_H_MgSO4 # Осталось ионов водорода после нейтрализации
-        n_MgOH_left = n_MgOH_added - n_MgSO4_tot # Осталось брусита, когда вся кислота потрачена
-        n_OH = 2 * n_MgOH_left
-        #учитываем растворимость, находим количество растворенного сульфата магния
-        if n_SO4_MgSO4_tot < mgso4_sol_interp.get_sol(T, C_SO4_free)*comp.mass_liquid:
-            n_MgSO4_aq = n_SO4_MgSO4_tot
-        else:
-            n_MgSO4_aq = mgso4_sol_interp.get_sol(T, C_SO4_free)*comp.mass_liquid
+        K = 10 ** logK
         
-        #выводим количество MgSO4 в осадке
-        n_MgSO4_prec = n_MgSO4_tot - n_MgSO4_aq
-    
-    # 4. ОБЩИЕ БАЛАНСЫ 
-    n_Fe2 = n_Fe2_left
-    n_SO4 = n_SO4_free - n_MgSO4_prec + n_SO4_added
-    n_H = n_H_free - (n_H_MgSO4 if add_MgOH==True else 0) + (n_H_added if add_H2SO4==True else 0)
-    n_Fe3 = n_Fe3_tot - n_Fe3_FeAsO4
-    n_Mg2 = (n_MgSO4_aq if add_MgOH==True else 0)
-
-
-    # Концентрации
-    #Записываем концентрации ионов для упрощенного расчета
-  
-    C_H = n_H / comp.mass_liquid
-    C_SO4 = n_SO4 / comp.mass_liquid
-    C_Fe3 = n_Fe3 / comp.mass_liquid
-    C_Fe2 = n_Fe2 / comp.mass_liquid
-    C_K = comp.m_K * S_Ox / comp.mass_liquid / molar_masses['K']
-    C_NH4 = comp.m_NH4 * S_Ox / comp.mass_liquid / molar_masses['NH4']
-    C_Mg = n_Mg2 / comp.mass_liquid
-    
-    # Делаем копию данных и используем их как расчетный образец
-    raw_params = SolutionState.ion_params(comp)
-    ions_temp = {}
-    for name, data in raw_params.items():
-        ions_temp[name] = data.copy()
-    
-    
-    ions_temp['H']['C'] = C_H
-    ions_temp['SO4']['C'] = C_SO4
-    ions_temp['Fe3']['C'] = C_Fe3
-    ions_temp['Fe2']['C'] = C_Fe2
-    ions_temp['K']['C'] = C_K
-    ions_temp['NH4']['C'] = C_NH4
-    ions_temp['Mg']['C'] = C_Mg
-    
-
-    # 5. Расчёт активностей
-    activity_model = ActivityCalculator(water_props.get_density, water_props.get_dielectric)
-    
-    # 6. Создаем решатель для итерационного уточнения
-    solver = SpeciationSolver(
-        T=T,
-        ions=ions_temp,
-        activity_model=activity_model,
-        h2so4_interp=h2so4_interp,
-        mgso4_interp=mgso4_K_interp,
-        add_Mg=add_MgOH,  
-        max_iter=15,      
-        tol=1e-4          
-    )
-    solver.calculate (T, ions_temp)
-    a_H = max(ions_temp['H']['a'], 1e-15)
-    a_Fe = max(ions_temp['Fe3']['a'], 1e-15)
-    a_SO4 =  max(ions_temp['SO4']['a'], 1e-15)
-    pH = -np.log10(a_H) if a_H > 0 else 7
-
-
-    jar_params = jarosite_params[jarosite_type]
-    dG0_T = jar_params['dH0'] - T * jar_params['dS0']
-    # получаем имя иона
-    cation = jarosite_params_dict[jarosite_type]['ion_name']
-    if cation == 'H3O': 
-        Q_no_iter = (C_H**(5/3)) / C_Fe3 * C_SO4**(2/3)
-        dG_no_iter = dG0_T + constants.R * T * np.log(Q_no_iter) if Q_no_iter > 1e-10 else 1e4
+        self.points = np.column_stack([temp, ionic_strength])
+        self.K = K
         
-        Q_simple = (max(ions_temp['H']['C'],1e-15))**(5/3) / max(ions_temp['Fe3']['C'], 1e-15) * (max(ions_temp['SO4']['C'], 1e-15))**(2/3)
-        dG_simple = dG0_T + constants.R * T * np.log(Q_simple) if Q_simple > 1e-10 else 1e4
-
-        Q_full = a_H**(5/3) / (a_Fe * a_SO4**(2/3))
-        dG_full = dG0_T + constants.R * T * np.log(Q_full) if Q_full > 1e-10 else 1e4
-    else: 
-        Q_no_iter = max((C_H**2), 1e-15) / max(C_Fe3, 1e-15) * max(C_SO4,1e-15)**(2/3)*(max(ions_temp[cation]['C'], 1e-15)**(1/3))
-        dG_no_iter = dG0_T + constants.R * T * np.log(Q_no_iter) if Q_no_iter > 1e-10 else 1e4
-
-        Q_simple = (max(ions_temp['H']['C'],1e-15))**2 / max(ions_temp['Fe3']['C'], 1e-15) * (max(ions_temp['SO4']['C'], 1e-15))**(2/3)*(ions_temp[cation]['C']**(1/3))
-        dG_simple = dG0_T + constants.R * T * np.log(Q_simple) if Q_simple > 1e-10 else 1e4
-    
-        Q_full = a_H**2 / (a_Fe * a_SO4**(2/3) * max(ions_temp[cation]['a'], 1e-15)**(1/3))
-        dG_full = dG0_T + constants.R * T * np.log(Q_full) if Q_full > 1e-10 else 1e4    
-    
-    report = {
-        'pH': pH,
-        'Q_simple': Q_simple,
-        'Q_full': Q_full,
-        'Q_no_iter': Q_no_iter,
-        'dG_full': dG_full / 1000, # кДж
-        'dG_simple': dG_simple /1000, # кДж
-        'dG_no_iter': dG_no_iter /1000, # кДж
-
-        # Концентрации (моль/л)
-        'C_H': ions_temp['H']['C'],
-        'C_SO4': ions_temp['SO4']['C'],
-        'C_Fe3': ions_temp['Fe3']['C'],
-        'C_Fe2': ions_temp['Fe2']['C'],
-        'C_K': ions_temp['K']['C'],
-        'C_NH4': ions_temp['NH4']['C'],
-        'C_Mg': ions_temp['Mg']['C'],
+        self.scaler = StandardScaler()
+        self.points_normalized = self.scaler.fit_transform(self.points)
         
-        # Активности
-        'a_H': ions_temp['H']['a'],
-        'a_SO4': ions_temp['SO4']['a'],
-        'a_HSO4': ions_temp['HSO4']['a'],
-        'a_Fe3': ions_temp['Fe3']['a'],
-        'a_Fe2': ions_temp['Fe2']['a'],
-        'a_K': ions_temp['K']['a'],
-        'a_NH4': ions_temp['NH4']['a'],
-        'a_Mg': ions_temp['Mg']['a'],
-    }
-
-    return report
-
-
-def run_scenario(j_type, T, S_Ox, add_H2SO4, add_MgOH, scenario_name, results, i, j):
+        self.rbf_interpolator = RBFInterpolator(
+            self.points_normalized, K,
+            kernel='cubic', smoothing=0.1
+        )
     
-    calc = CompositionCalculator(molar_masses)
-    calc.calculate_ore_composition(Fe_w, S_w, As_w, K_w, NH4_w,
-                                   mass_ore, Ж_Т, Mg_S, Fe_Ox,
-                                   H2SO4_add_percent) 
-
-    result = calculate_for_T_and_S_Ox(T, S_Ox, calc, 
-                                     add_H2SO4=add_H2SO4, 
-                                     add_MgOH=add_MgOH,
-                                     jarosite_type=j_type)
-    
-    results[j_type][scenario_name]['report'][i, j] = result
-    
-   # balance = check_mass_balance(result, T, S_Ox, 
-                            #    add_H2SO4=add_H2SO4, 
-                               # add_MgOH=add_MgOH, 
-                               # jarosite_type=j_type)
-   # results[j_type][scenario_name]['balance_check'][i, j] = balance
-    return result
-
-for var in ['i', 'j', 'i_SOx', 'j_T']:
-    if var in globals():
-        del globals()[var]
-
-for j_type in jarosite_types:
-    for idx_S in range(len(S_Ox_values)):    
-        for idx_T in range(len(T_values)):  
-            T = T_values[idx_T]
-            S_Ox = S_Ox_values[idx_S]
-            
-            run_scenario(j_type, T, S_Ox, False, False, 'no_add', 
-                        results, idx_S, idx_T)
-            run_scenario(j_type, T, S_Ox, True, False, 'with_acid', 
-                        results, idx_S, idx_T)
-            run_scenario(j_type, T, S_Ox, False, True, 'with_bruc', 
-                        results, idx_S, idx_T)
+    def get_K(self, T_K, ionic_strength):
+        point = np.array([[T_K, ionic_strength]])
+        point_normalized = self.scaler.transform(point)
+        return float(self.rbf_interpolator(point_normalized)[0])
