@@ -1,4 +1,7 @@
 # Функция расчета для конкретных T и S_Ox с возможностью добавки H2SO4 или брусита для разных ярозитов
+from xml.sax.handler import all_features
+
+
 def calculate_for_T_and_S_Ox(T, S_Ox, comp = CompositionCalculator, add_H2SO4=False, add_MgOH=False, jarosite_type='ion_name'):
     
     jar_params = jarosite_params[jarosite_type]
@@ -115,7 +118,11 @@ def calculate_for_T_and_S_Ox(T, S_Ox, comp = CompositionCalculator, add_H2SO4=Fa
     C_Mg = n_Mg2 / comp.mass_liquid
     
     # Делаем копию данных и используем их как расчетный образец
-    ions_temp = copy.deepcopy(SolutionState.ion_params(comp))
+    raw_params = SolutionState.ion_params(comp)
+    ions_temp = {}
+    for name, data in raw_params.items():
+        ions_temp[name] = data.copy()
+    
     
     ions_temp['H']['C'] = C_H
     ions_temp['SO4']['C'] = C_SO4
@@ -125,6 +132,7 @@ def calculate_for_T_and_S_Ox(T, S_Ox, comp = CompositionCalculator, add_H2SO4=Fa
     ions_temp['NH4']['C'] = C_NH4
     ions_temp['Mg']['C'] = C_Mg
     
+
     # 5. Расчёт активностей
     activity_model = ActivityCalculator(water_props.get_density, water_props.get_dielectric)
     
@@ -140,23 +148,34 @@ def calculate_for_T_and_S_Ox(T, S_Ox, comp = CompositionCalculator, add_H2SO4=Fa
         tol=1e-8          
     )
     
-    final_state = solver.calculate(T, ions_temp)
-    a_H = ions_temp['H']['a']
+    a_H = max(ions_temp['H']['a'], 1e-15)
+    a_Fe = max(ions_temp['Fe3']['a'], 1e-15)
+    a_SO4 =  max(ions_temp['SO4']['a'], 1e-15)
+    pH = -np.log10(a_H) if a_H > 0 else 7
+
+
     jar_params = jarosite_params[jarosite_type]
     dG0_T = jar_params['dH0'] - T * jar_params['dS0']
-
     # получаем имя иона
     cation = jarosite_params_dict[jarosite_type]['ion_name']
-    Q_no_iter = (C_H**2) / C_Fe3 * C_SO4**(2/3)*(ions_temp[cation]['C']**(1/3))
-    dG_no_iter = dG0_T + constants.R * T * np.log(Q_no_iter) if Q_no_iter > 1e-10 else 1e4
+    if cation == 'H3O': 
+        Q_no_iter = (C_H**(5/3)) / C_Fe3 * C_SO4**(2/3)
+        dG_no_iter = dG0_T + constants.R * T * np.log(Q_no_iter) if Q_no_iter > 1e-10 else 1e4
+        
+        Q_simple = (max(ions_temp['H']['C'],1e-15))**(5/3) / max(ions_temp['Fe3']['C'], 1e-15) * (max(ions_temp['SO4']['C'], 1e-15))**(2/3)
+        dG_simple = dG0_T + constants.R * T * np.log(Q_simple) if Q_simple > 1e-10 else 1e4
 
+        Q_full = a_H**(5/3) / (a_Fe * a_SO4**(2/3))
+        dG_full = dG0_T + constants.R * T * np.log(Q_full) if Q_full > 1e-10 else 1e4
+    else: 
+        Q_no_iter = max((C_H**2), 1e-15) / max(C_Fe3, 1e-15) * max(C_SO4,1e-15)**(2/3)*(max(ions_temp[cation]['C'], 1e-15)**(1/3))
+        dG_no_iter = dG0_T + constants.R * T * np.log(Q_no_iter) if Q_no_iter > 1e-10 else 1e4
 
-    Q_simple = (ions_temp['H']['C']**2) / (ions_temp['Fe3']['C'] * (ions_temp['SO4']['C']**(2/3))*(ions_temp[cation]['C']**(1/3)))
-    dG_simple = dG0_T + constants.R * T * np.log(Q_simple) if Q_simple > 1e-10 else 1e4
+        Q_simple = (max(ions_temp['H']['C'],1e-15))**2 / max(ions_temp['Fe3']['C'], 1e-15) * (max(ions_temp['SO4']['C'], 1e-15))**(2/3)*(ions_temp[cation]['C']**(1/3))
+        dG_simple = dG0_T + constants.R * T * np.log(Q_simple) if Q_simple > 1e-10 else 1e4
     
-    Q_full = (a_H**2) / (ions_temp['Fe3']['a'] * (ions_temp['SO4']['a']**(2/3)))
-    dG_full = dG0_T + constants.R * T * np.log(Q_full) if Q_full > 1e-10 else 1e4
-    pH = -np.log10(a_H) if a_H > 0 else 7
+        Q_full = a_H**2 / (a_Fe * a_SO4**(2/3) * max(ions_temp[cation]['a'], 1e-15)**(1/3))
+        dG_full = dG0_T + constants.R * T * np.log(Q_full) if Q_full > 1e-10 else 1e4    
     
     report = {
         'pH': pH,
