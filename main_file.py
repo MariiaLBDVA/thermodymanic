@@ -26,14 +26,13 @@ def get_molar_masses():
     }
 
 # основные параметры ярозитов
-def get_jarosite_params(molar_masses):
+def get_jarosite_params():
     """Получить параметры ярозитов."""
     return {
         'K': {
             'name': 'K-ярозит',
             'dH0': 49683.33,  # Дж/моль
             'dS0': 233.52,    # Дж/(моль·К)
-            'M_cation': molar_masses['K'],
             'ion_name': 'K',
             'color': 'blue'
         },
@@ -41,7 +40,6 @@ def get_jarosite_params(molar_masses):
             'name': 'H₃O-ярозит',
             'dH0': 90630,
             'dS0': 248.2166667,
-            'M_cation': molar_masses['H3O'],
             'ion_name': 'H3O',
             'color': 'red'
         },
@@ -49,7 +47,6 @@ def get_jarosite_params(molar_masses):
             'name': 'NH₄-ярозит',
             'dH0': 58920,
             'dS0': 236.4866667,
-            'M_cation': molar_masses['NH4'],
             'ion_name': 'NH4',
             'color': 'purple'
         }
@@ -61,12 +58,10 @@ class CompositionCalculator:
     def __init__(self, molar_masses):
         self.M = molar_masses
 
-    
     def calculate_ore_composition(self, Fe_w, S_w, As_w, K_w, NH4_w,
                                    mass_ore, Ж_Т, Mg_S, Fe_Ox,
                                    H2SO4_add_percent):
         
-    
         mass_solid = mass_ore / (Ж_Т + 1)  # г
         mass_liquid = Ж_Т * mass_ore / 1000 * (Ж_Т + 1)  # кг
 
