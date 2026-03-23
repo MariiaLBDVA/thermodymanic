@@ -1,0 +1,190 @@
+# Функция расчета для конкретных T и S_Ox с возможностью добавки H2SO4 или брусита для разных ярозитов
+def calculate_for_T_and_S_Ox(T, S_Ox, comp = CompositionCalculator, add_H2SO4=False, add_MgOH=False, jarosite_type='ion_name'):
+    
+    jar_params = jarosite_params[jarosite_type]
+    dH0 = jar_params['dH0']
+    dS0 = jar_params['dS0']
+
+    # 1. ОСНОВНЫЕ РЕАКЦИИ ОКИСЛЕНИЯ МИНЕРАЛОВ
+    # 1.1. Окисление пирита (зависит от степени окисления серы)
+    n_Fe2_pyr = comp.n_FeS2 * S_Ox
+    n_SO4_pyr = 2 * comp.n_FeS2 * S_Ox
+    n_H_pyr = 2 * comp.n_FeS2 * S_Ox
+
+    # 1.2. Окисление арсенопирита
+    n_Fe2_ars = comp.n_FeAsS
+    n_SO4_ars = comp.n_FeAsS
+    n_H_ars = 3 * comp.n_FeAsS
+    n_AsO4_ars = comp.n_FeAsS
+    
+    #количество ионов серной кислоты после окисления
+    n_SO4_free = n_SO4_pyr + n_SO4_ars + comp.n_S_excess
+    n_H_free = n_H_pyr + n_H_ars
+    
+    #концентрация кислоты после окисления (считаем по сульфат-ионам)
+    C_SO4_free = n_SO4_free / comp.mass_liquid
+    
+    # 1.3 ОКИСЛЕНИЕ Fe²⁺ до Fe³⁺
+    # все железо в руде
+    n_Fe2_tot = n_Fe2_ars + n_Fe2_pyr +  comp.n_Fe_excess
+    
+    # все железо, способное окислиться 
+    n_Fe2_Ox = n_Fe2_tot * Fe_Ox
+    
+    # если водород в избытке, количество окисленного железа равно всему, которое способно к окислению
+    if  n_H_free >  n_Fe2_Ox:
+        n_H_consumed_Fe_ox = n_Fe2_Ox
+        n_Fe3_tot = n_Fe2_Ox
+        n_Fe2_left = n_Fe2_tot - n_Fe2_Ox #неокисленное железо
+    # если железо в избытке, количество окисленного железа равно количеству водорода    
+    else:
+        n_H_consumed_Fe_ox = n_H_free
+        n_Fe3_tot = n_H_free
+        n_Fe2_left = n_Fe2_tot - n_Fe3_tot #неокисленное железо
+    
+    # 1.4 Окисленное железо осаждается в скородит
+    if n_AsO4_ars > n_Fe3_tot:
+        n_Fe3_FeAsO4 = 1 * n_Fe3_tot
+        n_As_left = n_AsO4_ars - n_Fe3_FeAsO4
+    else:
+        n_Fe3_FeAsO4 = n_AsO4_ars
+        n_As_left = 0
+    
+    n_H_free = n_H_free - n_H_consumed_Fe_ox
+    n_H2SO4_add = 0
+    n_SO4_added = 0
+    
+    # 2. ДОБАВКА H2SO4
+    if add_H2SO4==True:
+        n_H2SO4_add = (comp.m_H2SO4_add * 1000) / molar_masses['H2SO4']  
+        n_H_added = 2 * n_H2SO4_add
+        n_SO4_added = n_H2SO4_add
+        
+    n_SO4_MgSO4_tot = 0
+    n_MgSO4_aq = 0
+    n_H_MgSO4_free = 0
+    n_MgSO4_tot = 0
+    n_MgSO4_prec = 0
+    n_OH = 0
+    
+    # 3. ДОБАВКА Mg(OH)2 
+    if add_MgOH==True:
+        # Переводим массу Mg(OH)2 в моли
+        n_MgOH_added = comp.m_MgOH_add / molar_masses['Mg(OH)2']  
+        n_OH_added = 2 * n_MgOH_added
+        
+        # Брусит нейтрализует кислоту: Mg(OH)2 + 2H⁺ → Mg²⁺ + 2H2O
+        # Количество водорода, потребляемого после добавления брусита
+        if n_H_free > n_OH_added:
+            n_H_MgSO4 = n_OH_added
+            n_MgSO4_tot = n_OH_added / 2
+        else:
+            n_H_MgSO4 = n_H_free
+            n_MgSO4_tot = n_H_free / 2
+        
+        n_SO4_MgSO4_tot = n_MgSO4_tot  # Ионов сульфата на образование сульфата магния
+        n_H_MgSO4_free = n_H_free - n_H_MgSO4 # Осталось ионов водорода после нейтрализации
+        n_MgOH_left = n_MgOH_added - n_MgSO4_tot # Осталось брусита, когда вся кислота потрачена
+        n_OH = 2 * n_MgOH_left
+        #учитываем растворимость, находим количество растворенного сульфата магния
+        if n_SO4_MgSO4_tot < mgso4_sol_interp.get_sol(T, C_SO4_free)*comp.mass_liquid:
+            n_MgSO4_aq = n_SO4_MgSO4_tot
+        else:
+            n_MgSO4_aq = mgso4_sol_interp.get_sol(T, C_SO4_free)*comp.mass_liquid
+        
+        #выводим количество MgSO4 в осадке
+        n_MgSO4_prec = n_MgSO4_tot - n_MgSO4_aq
+    
+    # 4. ОБЩИЕ БАЛАНСЫ 
+    n_Fe2 = n_Fe2_left
+    n_SO4 = n_SO4_free - n_MgSO4_prec + n_SO4_added
+    n_H = n_H_free - (n_H_MgSO4 if add_MgOH==True else 0) + (n_H_added if add_H2SO4==True else 0)
+    n_Fe3 = n_Fe3_tot - n_Fe3_FeAsO4
+    n_Mg2 = (n_MgSO4_aq if add_MgOH==True else 0)
+
+
+    # Концентрации
+    #Записываем концентрации ионов для упрощенного расчета
+  
+    C_H = n_H / comp.mass_liquid
+    C_SO4 = n_SO4 / comp.mass_liquid
+    C_Fe3 = n_Fe3 / comp.mass_liquid
+    C_Fe2 = n_Fe2 / comp.mass_liquid
+    C_K = comp.m_K * S_Ox / comp.mass_liquid / molar_masses['K']
+    C_NH4 = comp.m_NH4 * S_Ox / comp.mass_liquid / molar_masses['NH4']
+    C_Mg = n_Mg2 / comp.mass_liquid
+    
+    # Делаем копию данных и используем их как расчетный образец
+    ions_temp = copy.deepcopy(SolutionState.ion_params(comp))
+    
+    ions_temp['H']['C'] = C_H
+    ions_temp['SO4']['C'] = C_SO4
+    ions_temp['Fe3']['C'] = C_Fe3
+    ions_temp['Fe2']['C'] = C_Fe2
+    ions_temp['K']['C'] = C_K
+    ions_temp['NH4']['C'] = C_NH4
+    ions_temp['Mg']['C'] = C_Mg
+    
+    # 5. Расчёт активностей
+    activity_model = ActivityCalculator(water_props.get_density, water_props.get_dielectric)
+    
+    # 6. Создаем решатель для итерационного уточнения
+    solver = SpeciationSolver(
+        T=T,
+        ions=ions_temp,
+        activity_model=activity_model,
+        h2so4_interp=h2so4_interp,
+        mgso4_interp=mgso4_K_interp,
+        add_Mg=add_MgOH,  
+        max_iter=50,      
+        tol=1e-8          
+    )
+    
+    final_state = solver.calculate(T, ions_temp)
+    a_H = ions_temp['H']['a']
+    jar_params = jarosite_params[jarosite_type]
+    dG0_T = jar_params['dH0'] - T * jar_params['dS0']
+
+    # получаем имя иона
+    cation = jarosite_params_dict[jarosite_type]['ion_name']
+    Q_no_iter = (C_H**2) / C_Fe3 * C_SO4**(2/3)*(ions_temp[cation]['C']**(1/3))
+    dG_no_iter = dG0_T + constants.R * T * np.log(Q_no_iter) if Q_no_iter > 1e-10 else 1e4
+
+
+    Q_simple = (ions_temp['H']['C']**2) / (ions_temp['Fe3']['C'] * (ions_temp['SO4']['C']**(2/3))*(ions_temp[cation]['C']**(1/3)))
+    dG_simple = dG0_T + constants.R * T * np.log(Q_simple) if Q_simple > 1e-10 else 1e4
+    
+    Q_full = (a_H**2) / (ions_temp['Fe3']['a'] * (ions_temp['SO4']['a']**(2/3)))
+    dG_full = dG0_T + constants.R * T * np.log(Q_full) if Q_full > 1e-10 else 1e4
+    pH = -np.log10(a_H) if a_H > 0 else 7
+    
+    report = {
+        'pH': pH,
+        'Q_simple': Q_simple,
+        'Q_full': Q_full,
+        'Q_no_iter': Q_no_iter,
+        'dG_full': dG_full / 1000, # кДж
+        'dG_simple': dG_simple /1000, # кДж
+        'dG_no_iter': dG_no_iter /1000, # кДж
+
+        # Концентрации (моль/л)
+        'C_H': ions_temp['H']['C'],
+        'C_SO4': ions_temp['SO4']['C'],
+        'C_Fe3': ions_temp['Fe3']['C'],
+        'C_Fe2': ions_temp['Fe2']['C'],
+        'C_K': ions_temp['K']['C'],
+        'C_NH4': ions_temp['NH4']['C'],
+        'C_Mg': ions_temp['Mg']['C'],
+        
+        # Активности
+        'a_H': ions_temp['H']['a'],
+        'a_SO4': ions_temp['SO4']['a'],
+        'a_HSO4': ions_temp['HSO4']['a'],
+        'a_Fe3': ions_temp['Fe3']['a'],
+        'a_Fe2': ions_temp['Fe2']['a'],
+        'a_K': ions_temp['K']['a'],
+        'a_NH4': ions_temp['NH4']['a'],
+        'a_Mg': ions_temp['Mg']['a'],
+    }
+
+    return report
