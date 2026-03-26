@@ -154,10 +154,10 @@ class MgSO4SolubilityInterpolator(Interpolator):
             np.column_stack([temp_raw, H2SO4_conc_raw]), 
             MgSO4_sol_raw,
             return_mask=True,
-            z_thresh=3,
-            k=15
+            z_thresh=10,
+            k=5
         )
-        
+        self.mask = mask
         # Финальные очищенные данные
         temp = temp_raw[mask]
         MgSO4_sol = MgSO4_sol_raw[mask]
@@ -181,7 +181,13 @@ class MgSO4SolubilityInterpolator(Interpolator):
 
     
     def get_sol(self, T_K, H2SO4_conc):
-        point = np.array([[T_K, H2SO4_conc]])
+
+        # Определяем границы доступных значений
+        temp_min, H2SO4_conc_min = self.points.min(axis=0)
+        temp_max, H2SO4_conc_max = self.points.max(axis=0)
+        temp_safe = np.clip(T_K,temp_min, temp_max)
+        H2SO4_conc_safe = np.clip(H2SO4_conc,H2SO4_conc_min, H2SO4_conc_max)
+        point = np.array([[temp_safe, H2SO4_conc_safe]])
         point_normalized = self.scaler.transform(point)
         return float(self.rbf_interpolator(point_normalized)[0])
     
@@ -196,6 +202,9 @@ class H2SO4ConstantInterpolator(Interpolator):
         K = 10 ** logK
         
         self.points = np.column_stack([temp, ionic_strength])
+        
+        
+        
         self.K = K
         
         self.scaler = StandardScaler()
@@ -207,6 +216,11 @@ class H2SO4ConstantInterpolator(Interpolator):
         )
     
     def get_K(self, T_K, ionic_strength):
-        point = np.array([[T_K, ionic_strength]])
+        # Определяем границы доступных значений
+        temp_min, ionic_strength_min = self.points.min(axis=0)
+        temp_max, ionic_strength_max = self.points.max(axis=0)
+        temp_safe = np.clip(T_K,temp_min, temp_max)
+        ionic_strength_safe = np.clip(ionic_strength,ionic_strength_min, ionic_strength_max)
+        point = np.array([[temp_safe, ionic_strength_safe]])
         point_normalized = self.scaler.transform(point)
         return float(self.rbf_interpolator(point_normalized)[0])
